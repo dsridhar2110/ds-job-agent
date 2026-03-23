@@ -1,0 +1,29 @@
+# Environment & secrets — NEVER commit these
+.env
+*.env
+
+# Job tracking & reports (personal data — keep local)
+seen_jobs.json
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
