@@ -197,7 +197,8 @@ def is_relevant(job: dict) -> bool:
     if any(w in title for w in bad_words):
         return False
     # Salary filter where available
-    salary_str = job.get("salary", "") or ""
+    salary_raw = job.get("salary", "")
+    salary_str = salary_raw if isinstance(salary_raw, str) else str(salary_raw)
     m = re.findall(r"£([\d,]+)", salary_str)
     if m:
         amounts = [int(x.replace(",", "")) for x in m]
