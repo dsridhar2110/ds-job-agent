@@ -26,10 +26,10 @@ REPORTS_DIR       = Path("reports")
 REPORTS_DIR.mkdir(exist_ok=True)
 
 SEARCHES = [
-    {"search": "Data Scientist",        "location": "London"},
-    {"search": "Machine Learning Engineer", "location": "London"},
-    {"search": "Analytics Engineer",    "location": "London"},
-    {"search": "Data Scientist",        "location": "remote"},
+    {"search": "Data Scientist",  "location": "United Kingdom"},
+    {"search": "Data Analyst",    "location": "United Kingdom"},
+    {"search": "Data Scientist",  "location": "remote"},
+    {"search": "Data Analyst",    "location": "remote"},
 ]
 
 MIN_SALARY = 55000  # filter out roles below this (where salary is shown)
@@ -191,11 +191,21 @@ def save_seen_jobs(seen: set):
 
 
 def is_relevant(job: dict) -> bool:
-    """Basic relevance filter."""
+    """Strict relevance filter — only Data Scientist / Data Analyst titles."""
     title = job.get("title", "").lower()
-    bad_words = ["junior", "graduate", "intern", "tutor", "trainer", "teaching"]
+
+    # Must contain at least one of these core role keywords
+    required_keywords = ["data scientist", "data analyst", "data science"]
+    if not any(kw in title for kw in required_keywords):
+        return False
+
+    # Exclude seniority/role mismatches
+    bad_words = ["junior", "graduate", "intern", "tutor", "trainer", "teaching",
+                 "vice president", "vp ", "director", "head of", "manager",
+                 "software engineer", "developer", "devops", "frontend", "backend"]
     if any(w in title for w in bad_words):
         return False
+
     # Salary filter where available
     salary_raw = job.get("salary", "")
     salary_str = salary_raw if isinstance(salary_raw, str) else str(salary_raw)
@@ -300,13 +310,18 @@ def generate_html_report(jobs_data: list[dict]) -> str:
         summary_escaped = j["tailored_summary"].replace("\n", "<br>")
         cover_escaped   = j["cover_letter"].replace("\n", "<br>")
 
+        work_tags = ""
+        for tag in j.get("work_tags", []):
+            work_tags += f'<span class="work-tag">{tag}</span>'
+
         job_cards += f"""
         <div class="job-card" id="job-{i}">
           <div class="job-header">
             <div>
               <div class="job-title">{j['title']}</div>
-              <div class="job-meta">{j['company']} · {j.get('location','London')} · {j.get('salary','Salary not listed')}</div>
+              <div class="job-meta">{j['company']} · {j.get('location','United Kingdom')} · {j.get('salary','Salary not listed')}</div>
               <div class="job-meta" style="margin-top:4px">Posted: {j.get('date','—')} &nbsp;|&nbsp; Match score: <strong>{j.get('match','—')}</strong></div>
+              {f'<div style="margin-top:6px">{work_tags}</div>' if work_tags else ''}
             </div>
             <a class="apply-btn" href="{j['url']}" target="_blank">Apply Now →</a>
           </div>
@@ -368,6 +383,7 @@ def generate_html_report(jobs_data: list[dict]) -> str:
   .copy-btn {{ margin-top: 10px; padding: 6px 16px; background: #e8f0fe; color: #1F4E79; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }}
   .copy-btn:hover {{ background: #c7d7f7; }}
   .skill {{ display: inline-block; background: #EAF3DE; color: #3B6D11; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 500; margin: 3px; }}
+  .work-tag {{ display: inline-block; background: #EEF2FF; color: #3730A3; border-radius: 10px; padding: 2px 9px; font-size: 11px; font-weight: 500; margin: 2px; }}
   .footer {{ text-align: center; padding: 32px; font-size: 12px; color: #999; }}
 </style>
 </head>
@@ -409,9 +425,12 @@ function copyText(id) {{
 
 # ── Email sender ───────────────────────────────────────────────────────────────
 def send_email(report_path: Path, job_count: int):
-    if not EMAIL_FROM or not EMAIL_PASSWORD:
-        print("  Email not configured — skipping email send")
+    if not EMAIL_FROM or not EMAIL_PASSWORD or not EMAIL_TO:
+        missing = [k for k, v in {"EMAIL_FROM": EMAIL_FROM, "EMAIL_PASSWORD": EMAIL_PASSWORD, "EMAIL_TO": EMAIL_TO}.items() if not v]
+        print(f"  ⚠ Email skipped — missing .env values: {', '.join(missing)}")
+        print("  → Add these to your .env file to receive email alerts")
         return
+    print(f"  Sending email from {EMAIL_FROM} → {EMAIL_TO}")
     try:
         msg = MIMEMultipart()
         msg["From"]    = EMAIL_FROM
@@ -487,6 +506,20 @@ def run():
         salary  = job.get("salary") or job.get("formattedRelativeTime", "")
         date    = job.get("date") or ""
 
+        # Collect work-setting tags from whatever fields the API returns
+        work_tags = []
+        raw_tags = job.get("jobTypes") or job.get("workTypes") or job.get("attributes") or []
+        if isinstance(raw_tags, list):
+            work_tags = [str(t) for t in raw_tags]
+        # Also scan JD text for common work-setting keywords
+        jd_lower = jd_text.lower()
+        for kw, label in [("hybrid", "Hybrid"), ("in-person", "In-person"),
+                           ("on-site", "On-site"), ("remote", "Remote"),
+                           ("flexitime", "Flexitime"), ("flexible hours", "Flexitime"),
+                           ("flexible working", "Flexible working")]:
+            if kw in jd_lower and label not in work_tags:
+                work_tags.append(label)
+
         print(f"  Tailoring for: {title} @ {company}")
         try:
             tailored_summary    = tailor_resume_summary(jd_text)
@@ -501,7 +534,8 @@ def run():
         jobs_data.append({
             "title":             title,
             "company":           company,
-            "location":          job.get("location", "London"),
+            "location":          job.get("location", "United Kingdom"),
+            "work_tags":         work_tags,
             "salary":            salary,
             "date":              date,
             "url":               url,
