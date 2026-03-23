@@ -13,7 +13,7 @@ from email import encoders
 from dotenv import load_dotenv
 import anthropic
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
@@ -152,9 +152,12 @@ to deliver scalable, data-driven decision systems.""",
 # ── Indeed search (via RapidAPI or direct) ─────────────────────────────────────
 def search_indeed(search_term: str, location: str) -> list[dict]:
     """Search Indeed UK for jobs. Returns list of job dicts."""
+    rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
+    print(f"  RAPIDAPI_KEY loaded: {'*' * (len(rapidapi_key) - 4)}{rapidapi_key[-4:]} (len={len(rapidapi_key)})")
+
     url = "https://indeed12.p.rapidapi.com/jobs/search"
     headers = {
-        "X-RapidAPI-Key": os.getenv("RAPIDAPI_KEY", ""),
+        "X-RapidAPI-Key": rapidapi_key,
         "X-RapidAPI-Host": "indeed12.p.rapidapi.com"
     }
     params = {
@@ -166,6 +169,9 @@ def search_indeed(search_term: str, location: str) -> list[dict]:
     }
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code == 401:
+            print(f"  401 Unauthorized — API key rejected. Response: {resp.text[:200]}")
+            return []
         resp.raise_for_status()
         data = resp.json()
         return data.get("hits", [])
