@@ -4,7 +4,7 @@ Searches Indeed UK, tailors resume & cover letter per job using Claude API,
 produces an HTML report every 8 hours.
 """
 
-import os, json, smtplib, requests, datetime, re
+import os, json, smtplib, requests, datetime, re, time
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -149,57 +149,64 @@ to deliver scalable, data-driven decision systems.""",
 }
 
 
-# ── Indeed search (via RapidAPI or direct) ─────────────────────────────────────
+RAPIDAPI_HOST = "indeed12.p.rapidapi.com"
+RAPIDAPI_BASE = f"https://{RAPIDAPI_HOST}"
+
+
+def _rapidapi_get(path: str, params: dict, retries: int = 3) -> dict | None:
+    """GET a RapidAPI endpoint with retry + exponential back-off on timeouts."""
+    rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
+    headers = {
+        "X-RapidAPI-Key": rapidapi_key,
+        "X-RapidAPI-Host": RAPIDAPI_HOST,
+    }
+    url = f"{RAPIDAPI_BASE}{path}"
+    wait = 2
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            if resp.status_code == 401:
+                print(f"  ✗ 401 Unauthorized — check your RAPIDAPI_KEY. Response: {resp.text[:200]}")
+                return None
+            if resp.status_code == 429:
+                print(f"  ✗ 429 Rate-limited — RapidAPI quota may be exhausted for this month.")
+                return None
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.Timeout:
+            print(f"  Timeout on attempt {attempt}/{retries} — waiting {wait}s...")
+            if attempt < retries:
+                time.sleep(wait)
+                wait *= 2
+        except Exception as e:
+            print(f"  Request error: {e}")
+            return None
+    print(f"  ✗ All {retries} attempts timed out for {path}. RapidAPI may be down — try again later.")
+    return None
+
+
+# ── Indeed search (via RapidAPI) ───────────────────────────────────────────────
 def search_indeed(search_term: str, location: str) -> list[dict]:
     """Search Indeed UK for jobs. Returns list of job dicts."""
     rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
-    print(f"  RAPIDAPI_KEY loaded: {'*' * (len(rapidapi_key) - 4)}{rapidapi_key[-4:]} (len={len(rapidapi_key)})")
+    print(f"  RAPIDAPI_KEY loaded: {'*' * max(0, len(rapidapi_key) - 4)}{rapidapi_key[-4:]} (len={len(rapidapi_key)})")
 
-    url = "https://indeed12.p.rapidapi.com/jobs/search"
-    headers = {
-        "X-RapidAPI-Key": rapidapi_key,
-        "X-RapidAPI-Host": "indeed12.p.rapidapi.com"
-    }
-    params = {
+    data = _rapidapi_get("/jobs/search", {
         "query": search_term,
         "location": location,
         "page_id": "1",
         "country": "gb",
-        "fromage": "1",  # last 1 day — we run every 8h so this catches everything
-    }
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        if resp.status_code == 401:
-            print(f"  401 Unauthorized — API key rejected. Response: {resp.text[:200]}")
-            return []
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("hits", [])
-    except Exception as e:
-        print(f"  Search error ({search_term} / {location}): {e}")
+        "fromage": "1",
+    })
+    if data is None:
         return []
+    return data.get("hits", [])
 
 
 def fetch_job_details(job_id: str) -> dict:
     """Fetch full job details (description, url) for a single job ID."""
-    rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
-    headers = {
-        "X-RapidAPI-Key": rapidapi_key,
-        "X-RapidAPI-Host": "indeed12.p.rapidapi.com"
-    }
-    try:
-        resp = requests.get(
-            "https://indeed12.p.rapidapi.com/job/details",
-            headers=headers,
-            params={"job_id": job_id, "country": "gb"},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            return {}
-        return resp.json()
-    except Exception as e:
-        print(f"    Detail fetch error ({job_id}): {e}")
-        return {}
+    data = _rapidapi_get("/job/details", {"job_id": job_id, "country": "gb"})
+    return data if isinstance(data, dict) else {}
 
 
 def format_salary(salary_raw) -> str:
