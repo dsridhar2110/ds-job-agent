@@ -180,6 +180,49 @@ def search_indeed(search_term: str, location: str) -> list[dict]:
         return []
 
 
+def fetch_job_details(job_id: str) -> dict:
+    """Fetch full job details (description, url) for a single job ID."""
+    rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
+    headers = {
+        "X-RapidAPI-Key": rapidapi_key,
+        "X-RapidAPI-Host": "indeed12.p.rapidapi.com"
+    }
+    try:
+        resp = requests.get(
+            "https://indeed12.p.rapidapi.com/job/details",
+            headers=headers,
+            params={"job_id": job_id, "country": "gb"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return {}
+        return resp.json()
+    except Exception as e:
+        print(f"    Detail fetch error ({job_id}): {e}")
+        return {}
+
+
+def format_salary(salary_raw) -> str:
+    """Return a human-readable salary string regardless of API format."""
+    if not salary_raw:
+        return "Salary not listed"
+    if isinstance(salary_raw, str):
+        return salary_raw
+    if isinstance(salary_raw, dict):
+        lo  = salary_raw.get("min") or salary_raw.get("minimum")
+        hi  = salary_raw.get("max") or salary_raw.get("maximum")
+        typ = salary_raw.get("type", "")
+        period = {"YEARLY": "/ yr", "MONTHLY": "/ mo", "HOURLY": "/ hr"}.get(
+            str(typ).upper(), str(typ))
+        if lo and hi:
+            return f"£{int(lo):,} – £{int(hi):,} {period}".strip()
+        if hi:
+            return f"Up to £{int(hi):,} {period}".strip()
+        if lo:
+            return f"From £{int(lo):,} {period}".strip()
+    return str(salary_raw)
+
+
 def load_seen_jobs() -> set:
     if SEEN_JOBS_FILE.exists():
         return set(json.loads(SEEN_JOBS_FILE.read_text()))
@@ -527,17 +570,37 @@ def run():
     for job in new_jobs:
         title   = job.get("title", "Data Scientist")
         company = job.get("company", "")
-        jd_text = job.get("description") or job.get("snippet") or ""
-        url     = job.get("link") or job.get("url", "#")
-        salary  = job.get("salary") or job.get("formattedRelativeTime", "")
         date    = job.get("date") or ""
 
-        # Collect work-setting tags from whatever fields the API returns
+        # Fetch full job details to get description and canonical URL
+        job_id  = job.get("id") or job.get("jobkey", "")
+        print(f"  Fetching details: {title} @ {company}")
+        details = fetch_job_details(job_id) if job_id else {}
+
+        # Description: details endpoint is authoritative; fall back to search snippet
+        jd_text = (details.get("description")
+                   or details.get("job_description")
+                   or details.get("full_description")
+                   or job.get("description")
+                   or job.get("snippet")
+                   or "")
+
+        # URL: prefer the detail response, then search hit, then construct from job_id
+        url = (details.get("link") or details.get("url") or details.get("job_url")
+               or job.get("link") or job.get("url")
+               or (f"https://uk.indeed.com/viewjob?jk={job_id}" if job_id else "#"))
+
+        # Salary: merge search + detail, format nicely
+        salary_raw = (details.get("salary") or job.get("salary")
+                      or job.get("formattedRelativeTime") or "")
+        salary = format_salary(salary_raw)
+
+        # Work-setting tags
         work_tags = []
-        raw_tags = job.get("jobTypes") or job.get("workTypes") or job.get("attributes") or []
+        raw_tags = (details.get("jobTypes") or details.get("workTypes")
+                    or job.get("jobTypes") or job.get("attributes") or [])
         if isinstance(raw_tags, list):
             work_tags = [str(t) for t in raw_tags]
-        # Also scan JD text for common work-setting keywords
         jd_lower = jd_text.lower()
         for kw, label in [("hybrid", "Hybrid"), ("in-person", "In-person"),
                            ("on-site", "On-site"), ("remote", "Remote"),
@@ -545,6 +608,9 @@ def run():
                            ("flexible working", "Flexible working")]:
             if kw in jd_lower and label not in work_tags:
                 work_tags.append(label)
+
+        if not jd_text:
+            print(f"    ⚠ No job description retrieved — tailoring will be generic")
 
         print(f"  Tailoring for: {title} @ {company}")
         try:
@@ -569,7 +635,7 @@ def run():
             "tailored_summary":  tailored_summary,
             "cover_letter":      cover_letter,
             "highlighted_skills": highlighted_skills,
-            "match":             f"{min(95, 70 + len(highlighted_skills) * 2)}%",
+            "match":             f"{min(95, 65 + len(highlighted_skills) * 3)}%" if highlighted_skills else "—",
         })
 
     # Generate report
