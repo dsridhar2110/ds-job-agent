@@ -28,8 +28,6 @@ REPORTS_DIR.mkdir(exist_ok=True)
 SEARCHES = [
     {"search": "Data Scientist",  "location": "United Kingdom"},
     {"search": "Data Analyst",    "location": "United Kingdom"},
-    {"search": "Data Scientist",  "location": "remote"},
-    {"search": "Data Analyst",    "location": "remote"},
 ]
 
 MIN_SALARY = 55000  # filter out roles below this (where salary is shown)
@@ -149,27 +147,26 @@ to deliver scalable, data-driven decision systems.""",
 }
 
 
-RAPIDAPI_HOST = "indeed12.p.rapidapi.com"
-RAPIDAPI_BASE = f"https://{RAPIDAPI_HOST}"
+JSEARCH_HOST = "jsearch.p.rapidapi.com"
 
 
-def _rapidapi_get(path: str, params: dict, retries: int = 3) -> dict | None:
-    """GET a RapidAPI endpoint with retry + exponential back-off on timeouts."""
+def _jsearch_get(path: str, params: dict, retries: int = 3) -> dict | None:
+    """GET JSearch RapidAPI endpoint with retry + exponential back-off."""
     rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
     headers = {
         "X-RapidAPI-Key": rapidapi_key,
-        "X-RapidAPI-Host": RAPIDAPI_HOST,
+        "X-RapidAPI-Host": JSEARCH_HOST,
     }
-    url = f"{RAPIDAPI_BASE}{path}"
+    url = f"https://{JSEARCH_HOST}{path}"
     wait = 2
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=30)
             if resp.status_code == 401:
-                print(f"  ✗ 401 Unauthorized — check your RAPIDAPI_KEY. Response: {resp.text[:200]}")
+                print(f"  ✗ 401 Unauthorized — check your RAPIDAPI_KEY.")
                 return None
             if resp.status_code == 429:
-                print(f"  ✗ 429 Rate-limited — RapidAPI quota may be exhausted for this month.")
+                print(f"  ✗ 429 Rate-limited — RapidAPI quota exhausted. Check rapidapi.com dashboard.")
                 return None
             resp.raise_for_status()
             return resp.json()
@@ -181,32 +178,61 @@ def _rapidapi_get(path: str, params: dict, retries: int = 3) -> dict | None:
         except Exception as e:
             print(f"  Request error: {e}")
             return None
-    print(f"  ✗ All {retries} attempts timed out for {path}. RapidAPI may be down — try again later.")
+    print(f"  ✗ All {retries} attempts timed out. API may be down — try again later.")
     return None
 
 
-# ── Indeed search (via RapidAPI) ───────────────────────────────────────────────
+# ── Job search via JSearch (Indeed + LinkedIn + Glassdoor via RapidAPI) ─────────
 def search_indeed(search_term: str, location: str) -> list[dict]:
-    """Search Indeed UK for jobs. Returns list of job dicts."""
+    """Search for jobs via JSearch API. Returns normalised list of job dicts."""
     rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
     print(f"  RAPIDAPI_KEY loaded: {'*' * max(0, len(rapidapi_key) - 4)}{rapidapi_key[-4:]} (len={len(rapidapi_key)})")
 
-    data = _rapidapi_get("/jobs/search", {
-        "query": search_term,
-        "location": location,
-        "page_id": "1",
+    data = _jsearch_get("/search", {
+        "query": f"{search_term} in {location}",
+        "page": "1",
+        "num_pages": "1",
+        "date_posted": "3days",
         "country": "gb",
-        "fromage": "3",  # last 3 days — seen_jobs.json deduplicates already-processed ones
+        "language": "en",
     })
     if data is None:
         return []
-    return data.get("hits", [])
+
+    jobs = []
+    for j in data.get("data", []):
+        # Normalise JSearch fields to the shape the rest of the code expects
+        salary_raw = ""
+        if j.get("job_min_salary") or j.get("job_max_salary"):
+            lo = j.get("job_min_salary")
+            hi = j.get("job_max_salary")
+            period = {"YEAR": "/ yr", "MONTH": "/ mo", "HOUR": "/ hr"}.get(
+                str(j.get("job_salary_period", "")).upper(), "")
+            if lo and hi:
+                salary_raw = f"£{int(lo):,} – £{int(hi):,} {period}".strip()
+            elif hi:
+                salary_raw = f"Up to £{int(hi):,} {period}".strip()
+            elif lo:
+                salary_raw = f"From £{int(lo):,} {period}".strip()
+
+        jobs.append({
+            "id":          j.get("job_id", ""),
+            "title":       j.get("job_title", ""),
+            "company":     j.get("employer_name", ""),
+            "location":    j.get("job_city") or j.get("job_country", location),
+            "salary":      salary_raw,
+            "date":        j.get("job_posted_at_datetime_utc", "")[:10],
+            "link":        j.get("job_apply_link") or j.get("job_google_link", "#"),
+            "description": j.get("job_description", ""),
+            "jobTypes":    j.get("job_employment_type", ""),
+            "highlights":  j.get("job_highlights", {}),
+        })
+    return jobs
 
 
 def fetch_job_details(job_id: str) -> dict:
-    """Fetch full job details (description, url) for a single job ID."""
-    data = _rapidapi_get("/job/details", {"job_id": job_id, "country": "gb"})
-    return data if isinstance(data, dict) else {}
+    """JSearch returns full descriptions in search results — no separate call needed."""
+    return {}
 
 
 def format_salary(salary_raw) -> str:
@@ -579,35 +605,18 @@ def run():
         company = job.get("company", "")
         date    = job.get("date") or ""
 
-        # Fetch full job details to get description and canonical URL
-        job_id  = job.get("id") or job.get("jobkey", "")
-        print(f"  Fetching details: {title} @ {company}")
-        details = fetch_job_details(job_id) if job_id else {}
+        # JSearch returns full description in search results — no extra API call needed
+        jd_text = job.get("description") or ""
+        url     = job.get("link") or "#"
+        salary  = job.get("salary") or "Salary not listed"
 
-        # Description: details endpoint is authoritative; fall back to search snippet
-        jd_text = (details.get("description")
-                   or details.get("job_description")
-                   or details.get("full_description")
-                   or job.get("description")
-                   or job.get("snippet")
-                   or "")
-
-        # URL: prefer the detail response, then search hit, then construct from job_id
-        url = (details.get("link") or details.get("url") or details.get("job_url")
-               or job.get("link") or job.get("url")
-               or (f"https://uk.indeed.com/viewjob?jk={job_id}" if job_id else "#"))
-
-        # Salary: merge search + detail, format nicely
-        salary_raw = (details.get("salary") or job.get("salary")
-                      or job.get("formattedRelativeTime") or "")
-        salary = format_salary(salary_raw)
-
-        # Work-setting tags
+        # Work-setting tags from employment type + JD text scan
         work_tags = []
-        raw_tags = (details.get("jobTypes") or details.get("workTypes")
-                    or job.get("jobTypes") or job.get("attributes") or [])
-        if isinstance(raw_tags, list):
-            work_tags = [str(t) for t in raw_tags]
+        emp_type = job.get("jobTypes", "")
+        if isinstance(emp_type, str) and emp_type:
+            work_tags.append(emp_type.replace("_", " ").title())
+        elif isinstance(emp_type, list):
+            work_tags = [str(t).replace("_", " ").title() for t in emp_type]
         jd_lower = jd_text.lower()
         for kw, label in [("hybrid", "Hybrid"), ("in-person", "In-person"),
                            ("on-site", "On-site"), ("remote", "Remote"),
