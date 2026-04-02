@@ -196,7 +196,7 @@ def search_indeed(search_term: str, location: str) -> list[dict]:
         "location": location,
         "page_id": "1",
         "country": "gb",
-        "fromage": "1",
+        "fromage": "3",  # last 3 days — seen_jobs.json deduplicates already-processed ones
     })
     if data is None:
         return []
