@@ -187,7 +187,11 @@ def load_seen_jobs() -> set:
 
 
 def save_seen_jobs(seen: set):
-    SEEN_JOBS_FILE.write_text(json.dumps(list(seen), indent=2))
+    # Cap at 300 most-recent IDs so old entries don't permanently block jobs
+    entries = list(seen)
+    if len(entries) > 300:
+        entries = entries[-300:]
+    SEEN_JOBS_FILE.write_text(json.dumps(entries, indent=2))
 
 
 def is_relevant(job: dict) -> bool:
@@ -424,6 +428,27 @@ function copyText(id) {{
 
 
 # ── Email sender ───────────────────────────────────────────────────────────────
+def send_status_email():
+    """Send a brief status email when the agent ran but found no new jobs."""
+    if not EMAIL_FROM or not EMAIL_PASSWORD or not EMAIL_TO:
+        return
+    try:
+        msg = MIMEMultipart()
+        msg["From"]    = EMAIL_FROM
+        msg["To"]      = EMAIL_TO
+        msg["Subject"] = f"DS Job Agent ran — no new jobs {datetime.datetime.now().strftime('%d %b %H:%M')}"
+        msg.attach(MIMEText(
+            "Hi Deekshita,\n\nYour job agent ran this cycle but found no new Data Scientist / "
+            "Data Analyst roles that haven't been seen before.\n\nThe agent is healthy and will "
+            "check again in 8 hours.\n\n— Your Job Agent", "plain"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_FROM, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print(f"  Status email sent to {EMAIL_TO}")
+    except Exception as e:
+        print(f"  Status email error: {e}")
+
+
 def send_email(report_path: Path, job_count: int):
     if not EMAIL_FROM or not EMAIL_PASSWORD or not EMAIL_TO:
         missing = [k for k, v in {"EMAIL_FROM": EMAIL_FROM, "EMAIL_PASSWORD": EMAIL_PASSWORD, "EMAIL_TO": EMAIL_TO}.items() if not v]
@@ -491,8 +516,9 @@ def run():
             print(f"  New job: {job.get('title','?')} @ {job.get('company','?')}")
 
     if not new_jobs:
-        print("\nNo new jobs this run. Check again in 8 hours.")
+        print("\nNo new jobs this run — sending status email.")
         save_seen_jobs(seen)
+        send_status_email()
         return
 
     print(f"\nProcessing {len(new_jobs)} new jobs with Claude...")
